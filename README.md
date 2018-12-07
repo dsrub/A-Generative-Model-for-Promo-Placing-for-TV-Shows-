@@ -1,5 +1,5 @@
-*DMA Rankr*
-# ---
+*DMA Rankr
+---*
 
 ### This is a novel generative model which ranks where, geographically, it is most opportunistic to promote certain television programs.  [Here](https://github.com/dsrub/A-Generative-Model-for-Promo-Placing-for-TV-Shows-/blob/master/Notesv2.pdf) is a full description of the model and the math behind it.
 
