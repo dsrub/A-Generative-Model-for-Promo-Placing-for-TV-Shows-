@@ -6,6 +6,7 @@ import pandas as pd
 from scipy.special import erf
 import numpy as np
 import sys
+from fbprophet import Prophet
 sys.path.insert(0, 'utilities/')
 from redshift_helper import *
 from pomegranate import *
@@ -366,6 +367,83 @@ class DMAGenerativeModel():
 
 
         return (ERatio-1, VarRatio)
+
+    def UpdateForecasts(self):
+
+        """
+        Updates all time series forecast of the number of respondents in each DMA (usining facebook's prophet) and writes 
+        all forecasts to CSV.  These forecasts are used in this generative model.  Note this takes about an, so should only 
+        be updated occasionally.  There are no inputs and the fuction does not return anthing.  It merely computs the 
+        forecasts and writes the results to 'data/all_intab_forecasts.csv'
+
+        """
+
+
+
+        ###read in credentials
+        f = open(credsfile, "r")
+        creds = f.read().splitlines()
+        f.close()
+
+
+
+        ###connect to redshift
+        cur, con = redshift_connect(creds[0], '\\' + creds[1], creds[2], creds[3], creds[4])
+
+        ### fetch data of number of people intab for all DMAs across time
+
+        command = \
+          "select date, RTRIM(dma_name) as dma_name, count(distinct(pid)) as total_intab \
+            from( \
+                 (select A.date, A.pid, B.household_number \
+                    from dev.nielsen_in_tab A \
+                  INNER JOIN dev.nielsen_market_breaks B \
+                  ON A.pid = B.pid) AS C \
+          INNER JOIN dev.l5m_dmas \
+          ON dev.l5m_dmas.hhid =c.household_number) \
+          group by date, dma_name \
+          order by date, dma_name;"
+
+        df = pd_df(cur, command)
+
+        ### close up connections
+        cur.close()
+        con.close()
+
+        df1['dma_name'] = df1['dma_name'].apply(lambda x: x.lstrip().rstrip())
+
+        ### cut off data before 2016
+
+        df['year'] = df['date'].apply(lambda x: x.year)
+        df = df[df.year>2015]
+        del df['year']
+
+        ### use prophet to forcast all DMAs, save the figure for each forecast and save a csv of all forecasts
+
+        forecasts = []
+
+        for name in set(df.dma_name):
+
+            df_to_fit = df[df.dma_name == name].reset_index(drop=True)
+            del df_to_fit['dma_name']
+            df_to_fit.columns = ['ds', 'y']
+            m = Prophet(interval_width=0.68)
+            m.fit(df_to_fit)
+
+            future = m.make_future_dataframe(periods=365)
+
+            forecast = m.predict(future)
+            stuff = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+            stuff['DMA'] = name
+            forecasts.append(stuff)
+            
+            
+        df_empty = pd.DataFrame({'ds':[], 'yhat':[], 'yhat_lower':[], 'yhat_upper':[], 'DMA':[]})
+        final_df = df_empty.append(forecasts).reset_index(drop=True)
+
+        final_df.to_csv('data/all_intab_forecasts.csv')
+
+        return 
 
 
 def SortRatios(ratios):
