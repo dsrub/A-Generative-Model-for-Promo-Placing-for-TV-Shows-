@@ -368,7 +368,7 @@ class DMAGenerativeModel():
 
         return (ERatio-1, VarRatio)
 
-    def UpdateForecasts(self):
+    def UpdateForecasts(self, credsfile = 'data/credentials.txt'):
 
         """
         Updates all time series forecast of the number of respondents in each DMA (usining facebook's prophet) and writes 
@@ -377,8 +377,6 @@ class DMAGenerativeModel():
         forecasts and writes the results to 'data/all_intab_forecasts.csv'
 
         """
-
-
 
         ###read in credentials
         f = open(credsfile, "r")
