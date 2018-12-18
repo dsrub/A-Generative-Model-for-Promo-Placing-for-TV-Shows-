@@ -78,7 +78,7 @@ class DMAGenerativeModel():
     
     fitted_vals_ : dict
         A dictionary giving the ML fitted parameters for each DMA in the form of:
-        (w0, w1, w2, mu, sigma, lam, best_fit_model, (NN)/(NN+N_o))
+        (w0, w1, w2, mu, sigma, lam, best_fit_model, (NN)/(NN+N_o), log_likelihood)
 
     
     Author : Douglas Rubin
@@ -269,7 +269,7 @@ class DMAGenerativeModel():
         ----------
         filter_val  : int
             Experimentally found value.  This is the percentile of data, below which, the data is not considered in the fit
-            This hacky fix fixes a lot of poorly fitted distributions.  5 seems to work well.
+            This hacky fix fixes a lot of poorly fitted distributions.  A cut off value of 5 seems to work well.
 
         Returns
         -------
@@ -291,7 +291,7 @@ class DMAGenerativeModel():
         dmas_to_remove = set()
         for dma in self.fitted_vals_:
             if self.fitted_vals_[dma][3] <= med/10. or self.fitted_vals_[dma][3] >= med*10.:
-                dmas_to_remove.add(dma)
+            	dmas_to_remove.add(dma)
 
         for dma in dmas_to_remove:
             self.possible_dmas_filtered_.remove(dma)
@@ -436,80 +436,81 @@ class DMAGenerativeModel():
 
         return (ERatio-1, VarRatio)
 
-    def UpdateForecasts(self, credsfile = 'data/credentials.txt'):
+def UpdateForecasts(credsfile = 'data/credentials.txt'):
 
-        """
-        Updates all time series forecast of the number of respondents in each DMA (usining facebook's prophet) and writes 
-        all forecasts to CSV.  These forecasts are used in this generative model.  Note this takes about an, so should only 
-        be updated occasionally.  There are no inputs and the fuction does not return anthing.  It merely computes the 
-        forecasts and writes the results to 'data/all_intab_forecasts.csv'
+    """
+    Updates all time series forecast of the number of respondents in each DMA (usining facebook's prophet) and writes 
+    all forecasts to CSV.  These forecasts are used in this generative model.  Note this takes about an, so should only 
+    be updated occasionally.  There are no inputs and the fuction does not return anthing.  It merely computes the 
+    forecasts and writes the results to 'data/all_intab_forecasts.csv'
 
-        """
+    """
 
-        ###read in credentials
-        f = open(credsfile, "r")
-        creds = f.read().splitlines()
-        f.close()
+    ###read in credentials
+    f = open(credsfile, "r")
+    creds = f.read().splitlines()
+    f.close()
 
 
 
-        ###connect to redshift
-        cur, con = redshift_connect(creds[0], '\\' + creds[1], creds[2], creds[3], creds[4])
+    ###connect to redshift
+    cur, con = redshift_connect(creds[0], '\\' + creds[1], creds[2], creds[3], creds[4])
 
-        ### fetch data of number of people intab for all DMAs across time
+    ### fetch data of number of people intab for all DMAs across time
 
-        command = \
-          "select date, RTRIM(dma_name) as dma_name, count(distinct(pid)) as total_intab \
-            from( \
-                 (select A.date, A.pid, B.household_number \
-                    from dev.nielsen_in_tab A \
-                  INNER JOIN dev.nielsen_market_breaks B \
-                  ON A.pid = B.pid) AS C \
-          INNER JOIN dev.l5m_dmas \
-          ON dev.l5m_dmas.hhid =c.household_number) \
-          group by date, dma_name \
-          order by date, dma_name;"
+    command = \
+      "select date, RTRIM(dma_name) as dma_name, count(distinct(pid)) as total_intab \
+        from( \
+             (select A.date, A.pid, B.household_number \
+                from dev.nielsen_in_tab A \
+              INNER JOIN dev.nielsen_market_breaks B \
+              ON A.pid = B.pid) AS C \
+      INNER JOIN dev.l5m_dmas \
+      ON dev.l5m_dmas.hhid =c.household_number) \
+      group by date, dma_name \
+      order by date, dma_name;"
 
-        df = pd_df(cur, command)
+    df = pd_df(cur, command)
 
-        ### close up connections
-        cur.close()
-        con.close()
+    ### close up connections
+    cur.close()
+    con.close()
 
-        df['dma_name'] = df['dma_name'].apply(lambda x: x.lstrip().rstrip())
+    ## strip white space
+    df['dma_name'] = df['dma_name'].apply(lambda x: x.lstrip().rstrip())
 
-        ### cut off data before 2016
+    ### cut off data before 2016
+    df['year'] = df['date'].apply(lambda x: x.year)
+    df = df[df.year>2015]
+    del df['year']
 
-        df['year'] = df['date'].apply(lambda x: x.year)
-        df = df[df.year>2015]
-        del df['year']
+    ### use prophet to forcast all DMAs, save the figure for each forecast and save a csv of all forecasts
 
-        ### use prophet to forcast all DMAs, save the figure for each forecast and save a csv of all forecasts
+    forecasts = []
 
-        forecasts = []
+    for name in set(df.dma_name):
 
-        for name in set(df.dma_name):
+        df_to_fit = df[df.dma_name == name].reset_index(drop=True)
+        del df_to_fit['dma_name']
+        df_to_fit.columns = ['ds', 'y']
+        m = Prophet(interval_width=0.68)
+        m.fit(df_to_fit)
 
-            df_to_fit = df[df.dma_name == name].reset_index(drop=True)
-            del df_to_fit['dma_name']
-            df_to_fit.columns = ['ds', 'y']
-            m = Prophet(interval_width=0.68)
-            m.fit(df_to_fit)
+        future = m.make_future_dataframe(periods=365)
 
-            future = m.make_future_dataframe(periods=365)
+        forecast = m.predict(future)
+        stuff = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+        stuff['DMA'] = name
+        forecasts.append(stuff)
+        
+        
+    df_empty = pd.DataFrame({'ds':[], 'yhat':[], 'yhat_lower':[], 'yhat_upper':[], 'DMA':[]})
+    final_df = df_empty.append(forecasts).reset_index(drop=True)
 
-            forecast = m.predict(future)
-            stuff = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
-            stuff['DMA'] = name
-            forecasts.append(stuff)
-            
-            
-        df_empty = pd.DataFrame({'ds':[], 'yhat':[], 'yhat_lower':[], 'yhat_upper':[], 'DMA':[]})
-        final_df = df_empty.append(forecasts).reset_index(drop=True)
+    ## write all forecasted time series to file
+    final_df.to_csv('data/all_intab_forecasts.csv')
 
-        final_df.to_csv('data/all_intab_forecasts.csv')
-
-        return 
+    return 
 
 
 def SortRatios(ratios):
