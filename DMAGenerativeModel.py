@@ -27,6 +27,37 @@ class DMAGenerativeModel():
     days_out : int
         Number of days in the future the promo will be shown.
 
+    rep_orig : str
+        Indicates whether to consider only repeats ('R'), only originals ('O') or both ('B'). 
+        Default is both.
+
+    age_lower : int
+        Lower age to consider (default is 2)
+    
+    age_upper : int
+        Upper age to consider (default is 99)
+
+    gender : str
+        Indicates whether to only consider male viewers ('M'), female viewers ('F') or both ('B').
+        Default is both
+
+    premier : str
+        Indicates whether to consider only premiers ('1'), not premiers ('0') or both ('B').
+        Default is both.
+
+    time_shifted_vieing : str
+        Indicates whether to consider only live viewing ('live'), same day ('same day') or ('other').
+        Defature is 'live'.
+
+    DOW_lower : int (0 - 6)
+        Default 1
+
+    DOW_upper : int (0 - 6)
+        Default 5
+        Together with DOW_lower can specify to only consider certain days, or ranges within the week 
+        to consider.  Note that 0 corresponds to Sunday, 1 corresponds to Monday, ...
+        For example, to consider only week days DOW_lower = 1 and DOW_upper = 5.
+
     
     Attributes
     ----------
@@ -55,18 +86,45 @@ class DMAGenerativeModel():
     """
 
 
-    def __init__(self, shows = [], days_out = 45):
+    def __init__(self, shows=[], days_out=45, rep_orig='B', age_lower = 2, age_upper = 99, gender='B', 
+        premier='B', time_shifted_vieing='live', DOW_lower=1, DOW_upper=5):
         self.shows = shows
         self.forecasts = pd.read_csv('data/all_intab_forecasts.csv', index_col=0)
         self.forecasts['ds'] = pd.to_datetime(self.forecasts['ds'])
         self.forecast_date = datetime.now().date() + timedelta(days=days_out)
+        if rep_orig == 'B':
+            self.rep_orig = ['R', 'O']
+        elif rep_orig == 'R':
+            self.rep_orig = ['R']
+        else:
+            self.rep_orig = ['O']
+        self.age_lower = age_lower
+        self.age_upper = age_upper
+        if gender == 'B':
+            self.gender= ['M', 'F']
+        elif gender == 'M':
+            self.gender = ['M']
+        else:
+            self.gender = ['F']
+        if premier == 'B':
+            self.premier= ['1', '0']
+        elif premier == '1':
+            self.premier = ['1']
+        else:
+            self.premier = ['0']
+        self.time_shifted_vieing=time_shifted_vieing
+        self.DOW_lower = DOW_lower
+        self.DOW_upper = DOW_upper
+
         
     def __ParseSQL(self, shows):
         """
         Parse string into readable SQL commands
         """
-
         shows = [f"'{x}'" for x in shows]
+        premier = [f"'{x}'" for x in self.premier]
+        rep_orig = [f"'{x}'" for x in self.rep_orig]
+        gender = [f"'{x}'" for x in self.gender]
 
         with open('utilities/SQL_commands.sql') as f:
             commands = [x for x in f if x[0] !='-' and x != '\n']
@@ -75,8 +133,17 @@ class DMAGenerativeModel():
         commands = commands.replace('\n', ' ')
 
 
+        ### insert supplied arguments into the SQL code
         commands = re.sub(' +',' ', commands)
         commands = commands.replace('PROGS_TO_REPLACE', '(' + ', '.join(shows) + ')')
+        commands = commands.replace('R_O_Table', '(' + ', '.join(rep_orig) + ')')
+        commands = commands.replace('TSV', f"'{self.time_shifted_vieing}'")
+        commands = commands.replace('AGE_lower', str(self.age_lower))
+        commands = commands.replace('AGE_upper', str(self.age_upper))
+        commands = commands.replace('DOW_lower', str(self.DOW_lower))
+        commands = commands.replace('DOW_upper', str(self.DOW_upper))
+        commands = commands.replace('PREMIER_TABLE', '(' + ', '.join(premier) + ')')
+        commands = commands.replace('GENDER_TABLE', '(' + ', '.join(gender) + ')')
         commands = commands.split(';')
 
         commands = [x.lstrip().rstrip() for x in commands]
@@ -194,7 +261,7 @@ class DMAGenerativeModel():
                             
         return 
     
-    def MLfitting(self, filter_val = 15):
+    def MLfitting(self, filter_val = 5):
         """
         Runs through all DMAs and performs the mixture model ML fits
         
@@ -202,7 +269,7 @@ class DMAGenerativeModel():
         ----------
         filter_val  : int
             Experimentally found value.  This is the percentile of data, below which, the data is not considered in the fit
-            This hacky fix fixes a lot of poorly fitted distributions
+            This hacky fix fixes a lot of poorly fitted distributions.  5 seems to work well.
 
         Returns
         -------
@@ -224,7 +291,7 @@ class DMAGenerativeModel():
         dmas_to_remove = set()
         for dma in self.fitted_vals_:
             if self.fitted_vals_[dma][3] <= med/10. or self.fitted_vals_[dma][3] >= med*10.:
-            	dmas_to_remove.add(dma)
+                dmas_to_remove.add(dma)
 
         for dma in dmas_to_remove:
             self.possible_dmas_filtered_.remove(dma)
@@ -264,7 +331,7 @@ class DMAGenerativeModel():
 
         Returns
         -------
-        ML fitted parameters and best model : tuple
+        ML fitted parameters and best model as well as log_likelihood of the fit : tuple
 
         """
 
@@ -306,8 +373,9 @@ class DMAGenerativeModel():
         w1 = w1*((NN)/(NN+N_o))
         w2 = w2*((NN)/(NN+N_o))
 
-        #w0 = w_delta, w1 = w_gauss, w2 = w_exp, ..., re-weighting factor 
-        return (w0, w1, w2, mu, sigma, lam, best_fit_model, (NN)/(NN+N_o))
+        #w0 = w_delta, w1 = w_gauss, w2 = w_exp, ..., re-weighting factor , log_likelihood of fit
+        return (w0, w1, w2, mu, sigma, lam, best_fit_model, (NN)/(NN+N_o), best_log_liklihood)
+
     
     
     def __ComputeExpVar(self, DMA, Delta):
@@ -331,7 +399,7 @@ class DMAGenerativeModel():
 
         
         
-        phi1, phi2, phi3, mu, sigma, lambd, best_fit_model, f = self.fitted_vals_[DMA]
+        phi1, phi2, phi3, mu, sigma, lambd, best_fit_model, f, best_log_liklihood = self.fitted_vals_[DMA]
         
         res = self.forecasts[(self.forecasts.DMA == DMA) & (self.forecasts.ds == self.forecast_date)]
         
@@ -373,7 +441,7 @@ class DMAGenerativeModel():
         """
         Updates all time series forecast of the number of respondents in each DMA (usining facebook's prophet) and writes 
         all forecasts to CSV.  These forecasts are used in this generative model.  Note this takes about an, so should only 
-        be updated occasionally.  There are no inputs and the fuction does not return anthing.  It merely computs the 
+        be updated occasionally.  There are no inputs and the fuction does not return anthing.  It merely computes the 
         forecasts and writes the results to 'data/all_intab_forecasts.csv'
 
         """
@@ -408,7 +476,7 @@ class DMAGenerativeModel():
         cur.close()
         con.close()
 
-        df1['dma_name'] = df1['dma_name'].apply(lambda x: x.lstrip().rstrip())
+        df['dma_name'] = df['dma_name'].apply(lambda x: x.lstrip().rstrip())
 
         ### cut off data before 2016
 
